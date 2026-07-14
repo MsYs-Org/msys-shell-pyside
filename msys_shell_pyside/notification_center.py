@@ -13,9 +13,15 @@ from typing import Any, Callable
 
 from msys_sdk import MsysClient
 
-from .adaptive import adaptive_panel_geometry
+from .adaptive import UiRect, adaptive_panel_rect
 from .localization import shell_text
-from msys_sdk.ui_fonts import configure_tk_fonts, font_spec
+from msys_sdk.ui_fonts import (
+    NAMED_TK_FONTS,
+    configure_tk_fonts,
+    font_spec,
+    logical_size_to_pixels,
+    requested_font_family,
+)
 
 
 HISTORY_SCHEMA = "msys.notification-history.v1"
@@ -33,6 +39,68 @@ MAX_URGENCY_CHARS = 32
 MIN_NOTIFICATION_WRAP_CHARS = 12
 MAX_NOTIFICATION_WRAP_CHARS = 80
 ESTIMATED_GLYPH_PIXELS = 13
+INITIAL_RENDER_NOTIFICATIONS = 16
+HOST_PUMP_INTERVAL_MS = 40
+
+# Shared light Material-ish palette. The panel deliberately uses flat Tk
+# primitives so it remains available on the 11 MiB target without ttk themes
+# or image assets.
+WINDOW_BG = "#F4F7FB"
+SURFACE = "#FFFFFF"
+TEXT_PRIMARY = "#172033"
+PRIMARY = "#2563EB"
+PRIMARY_CONTAINER = "#E8F0FE"
+OUTLINE = "#D6DEE9"
+SELECTED = "#DCE8FF"
+
+
+def configure_notification_fonts(
+    root: Any,
+    *,
+    default_size: int = 10,
+    font_module: Any | None = None,
+) -> str | None:
+    """Use an explicit supervised family without enumerating every Xft font.
+
+    Automatic family selection retains the SDK's CJK-capable policy. When the
+    profile already supplies MSYS_UI_FONT_FAMILY, enumerating the complete
+    target font set is redundant and can dominate cold starts on small boards.
+    """
+
+    family = requested_font_family()
+    if not family:
+        return configure_tk_fonts(root, default_size=default_size)
+    from tkinter import TclError
+
+    if font_module is None:
+        from tkinter import font as font_module
+
+    options = {
+        "family": family,
+        "size": -logical_size_to_pixels(default_size),
+    }
+    for name in NAMED_TK_FONTS:
+        try:
+            font_module.nametofont(name, root=root).configure(**options)
+        except (TclError, RuntimeError, TypeError):
+            continue
+    setattr(root, "_msys_tk_font_family", family)
+    if any(
+        os.environ.get(name)
+        for name in (
+            "MSYS_APP_ID",
+            "MSYS_COMPONENT_ID",
+            "MSYS_WINDOW_IDENTITY",
+            "MSYS_WINDOW_ROLE",
+        )
+    ):
+        from msys_sdk.ui_identity import configure_tk_window_identity
+
+        configure_tk_window_identity(
+            root,
+            os.environ.get("MSYS_APP_ID", "org.msys.shell.notification-center"),
+        )
+    return family
 
 
 def _bounded_text(value: Any, limit: int) -> str:
@@ -398,6 +466,7 @@ class NotificationCenterUi:
         self.clear_zone: Any | None = None
         self._notifications: list[dict[str, Any]] = []
         self._wrap_limit = 0
+        self._render_revision = 0
 
     def _create_panel(self) -> None:
         import tkinter as tk
@@ -409,67 +478,83 @@ class NotificationCenterUi:
             class_=os.environ.get("MSYS_WINDOW_IDENTITY", "MsysNotificationCenter"),
         )
         self.panel = panel
+        panel.withdraw()
         panel.title(shell_text("notification.window_title"))
         panel.geometry(self._geometry())
-        panel.configure(bg="#161c24")
+        panel.configure(bg=WINDOW_BG)
         panel.attributes("-topmost", True)
         panel.resizable(True, True)
         panel.minsize(220, 180)
         panel.protocol("WM_DELETE_WINDOW", self.hide_from_ui)
 
-        header = tk.Frame(panel, bg="#161c24")
-        header.pack(fill="x", padx=10, pady=(9, 6))
+        header = tk.Frame(panel, bg=SURFACE, highlightthickness=1, highlightbackground=OUTLINE)
+        header.pack(fill="x", padx=8, pady=(8, 6))
         tk.Label(
             header,
             text=shell_text("notification.title"),
-            bg="#161c24",
-            fg="white",
+            bg=SURFACE,
+            fg=TEXT_PRIMARY,
             font=font_spec(panel, 13, "bold"),
             anchor="w",
-        ).pack(side="left", expand=True, fill="x")
+        ).pack(side="left", expand=True, fill="x", padx=(10, 4), pady=8)
         self.count_label = tk.Label(
             header,
             text="0",
-            bg="#161c24",
-            fg="#8492a2",
+            bg=PRIMARY_CONTAINER,
+            fg=PRIMARY,
             font=font_spec(panel, 9),
+            padx=7,
+            pady=4,
         )
         self.count_label.pack(side="left", padx=5)
         self.clear_zone = tk.Label(
             header,
             text=shell_text("notification.clear"),
-            bg="#293441",
-            fg="white",
+            bg=PRIMARY_CONTAINER,
+            fg=PRIMARY,
             padx=8,
-            pady=5,
+            pady=7,
             cursor="hand2",
         )
-        self.clear_zone.pack(side="left", padx=3)
+        self.clear_zone.pack(side="left", padx=2)
         self.close_zone = tk.Label(
             header,
             text=shell_text("notification.close"),
-            bg="#293441",
-            fg="white",
+            bg=PRIMARY,
+            fg=SURFACE,
             padx=8,
-            pady=5,
+            pady=7,
             cursor="hand2",
         )
-        self.close_zone.pack(side="left", padx=3)
+        self.close_zone.pack(side="left", padx=(2, 8))
 
-        frame = tk.Frame(panel, bg="#161c24")
-        frame.pack(expand=True, fill="both", padx=10, pady=(0, 10))
+        frame = tk.Frame(
+            panel,
+            bg=SURFACE,
+            highlightthickness=1,
+            highlightbackground=OUTLINE,
+        )
+        frame.pack(expand=True, fill="both", padx=8, pady=(0, 8))
         self.listbox = tk.Listbox(
             frame,
-            bg="#222b35",
-            fg="white",
-            selectbackground="#34495e",
-            selectforeground="white",
+            bg=SURFACE,
+            fg=TEXT_PRIMARY,
+            selectbackground=SELECTED,
+            selectforeground=TEXT_PRIMARY,
             activestyle="none",
             relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
             font=font_spec(panel, 10),
         )
-        self.listbox.pack(side="left", expand=True, fill="both")
-        scrollbar = tk.Scrollbar(frame, command=self.listbox.yview)
+        self.listbox.pack(side="left", expand=True, fill="both", padx=(8, 2), pady=8)
+        scrollbar = tk.Scrollbar(
+            frame,
+            command=self.listbox.yview,
+            width=16,
+            relief="flat",
+            borderwidth=0,
+        )
         scrollbar.pack(side="right", fill="y")
         self.listbox.configure(yscrollcommand=scrollbar.set)
         self.listbox.bind("<Configure>", self._list_resized, add="+")
@@ -496,13 +581,13 @@ class NotificationCenterUi:
 
         panel.bind("<ButtonRelease-1>", release_hot_zone, add="+")
         panel.bind("<Escape>", lambda _event: self.hide_from_ui())
-        panel.withdraw()
 
-    def _geometry(self) -> str:
-        return adaptive_panel_geometry(
-            self.root,
-            width_ratio=0.94,
-            height_ratio=0.82,
+    def _panel_rect(self) -> UiRect:
+        return adaptive_panel_rect(
+            self.root.winfo_screenwidth(),
+            self.root.winfo_screenheight(),
+            width_ratio=0.96,
+            height_ratio=0.88,
             minimum_width=260,
             minimum_height=260,
             maximum_width=520,
@@ -510,12 +595,21 @@ class NotificationCenterUi:
             anchor="top-right",
         )
 
+    def _geometry(self) -> str:
+        return self._panel_rect().geometry()
+
     def show(self) -> None:
         self._create_panel()
         assert self.panel is not None
-        self.panel.geometry(self._geometry())
-        self.panel.update_idletasks()
-        self.refresh(self.service.store.list())
+        rect = self._panel_rect()
+        self.panel.geometry(rect.geometry())
+        self._wrap_limit = notification_wrap_limit(max(1, rect.width - 48))
+        notifications = self.service.store.list()
+        self.refresh(
+            notifications,
+            maximum=INITIAL_RENDER_NOTIFICATIONS,
+            defer_remaining=True,
+        )
         self.panel.deiconify()
         self.panel.lift()
         self.panel.attributes("-topmost", True)
@@ -535,8 +629,29 @@ class NotificationCenterUi:
         self._wrap_limit = wrap_limit
         self.refresh(self._notifications)
 
-    def refresh(self, notifications: list[dict[str, Any]]) -> None:
+    def refresh(
+        self,
+        notifications: list[dict[str, Any]],
+        *,
+        maximum: int | None = None,
+        defer_remaining: bool = False,
+    ) -> None:
         self._notifications = [dict(item) for item in notifications]
+        self._render_revision += 1
+        revision = self._render_revision
+        self._render(maximum)
+        if (
+            defer_remaining
+            and maximum is not None
+            and len(self._notifications) > maximum
+        ):
+            self.root.after_idle(lambda: self._finish_deferred_render(revision))
+
+    def _finish_deferred_render(self, revision: int) -> None:
+        if revision == self._render_revision:
+            self._render(None)
+
+    def _render(self, maximum: int | None) -> None:
         if self.panel is None or self.listbox is None:
             return
         self.listbox.delete(0, "end")
@@ -545,7 +660,7 @@ class NotificationCenterUi:
         )
         self._wrap_limit = wrap_limit
         for line in notification_lines(
-            self._notifications,
+            self._notifications if maximum is None else self._notifications[:maximum],
             character_limit=wrap_limit,
         ):
             self.listbox.insert("end", line)
@@ -554,31 +669,15 @@ class NotificationCenterUi:
 
 
 def run_tk() -> int:
-    import tkinter as tk
-
-    root = tk.Tk(className=os.environ.get("MSYS_WINDOW_IDENTITY", "MsysNotificationCenter"))
-    configure_tk_fonts(root, default_size=10)
-    root.title("msys-notification-center-host")
-    root.withdraw()
-    root.update_idletasks()
-
-    store = NotificationHistoryStore(history_path_from_env(), history_limit_from_env())
-    actions: queue.Queue[tuple[str, Any]] = queue.Queue()
-    service = NotificationCenterService(store, actions)
-
-    def clear_from_ui() -> None:
-        service.handle_call({"type": "call", "id": 0, "method": "clear", "payload": {}})
-
-    ui = NotificationCenterUi(root, service, clear_from_ui)
     client = MsysClient.from_env()
     client.hello()
     for topic in sorted(NOTIFICATION_TOPICS):
         client.subscribe(topic)
     client.ready()
-    client.event(
-        "msys.role.ready",
-        {"role": "notification-center", "component": client.component_id},
-    )
+
+    store = NotificationHistoryStore(history_path_from_env(), history_limit_from_env())
+    actions: queue.Queue[tuple[str, Any]] = queue.Queue()
+    service = NotificationCenterService(store, actions)
 
     def ipc_loop() -> None:
         try:
@@ -594,6 +693,29 @@ def run_tk() -> int:
         except Exception as exc:
             print(f"notification-center: IPC failed: {exc}", flush=True)
             actions.put(("shutdown", None))
+
+    # mIPC readiness means this on-demand role can already accept calls. Tk,
+    # font enumeration and the first panel are intentionally below this edge:
+    # a concurrent cold show is retained in the action queue and mapped as
+    # soon as the target display is ready, without tripping Core's five-second
+    # readiness timeout and restarting the now-warm process.
+    threading.Thread(target=ipc_loop, name="msys-notification-center-ipc", daemon=True).start()
+
+    import tkinter as tk
+
+    root = tk.Tk(className=os.environ.get("MSYS_WINDOW_IDENTITY", "MsysNotificationCenter"))
+    root.withdraw()
+    configure_notification_fonts(root, default_size=10)
+    root.title("msys-notification-center-host")
+    client.event(
+        "msys.role.ready",
+        {"role": "notification-center", "component": client.component_id},
+    )
+
+    def clear_from_ui() -> None:
+        service.handle_call({"type": "call", "id": 0, "method": "clear", "payload": {}})
+
+    ui = NotificationCenterUi(root, service, clear_from_ui)
 
     def pump() -> None:
         while True:
@@ -612,10 +734,9 @@ def run_tk() -> int:
                 ui.hide()
                 root.destroy()
                 return
-        root.after(40, pump)
+        root.after(HOST_PUMP_INTERVAL_MS, pump)
 
-    threading.Thread(target=ipc_loop, name="msys-notification-center-ipc", daemon=True).start()
-    root.after(40, pump)
+    root.after(0, pump)
     root.mainloop()
     return 0
 

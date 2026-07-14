@@ -3,7 +3,7 @@
 Reference MSYS shell providers implemented in Python. They do not require
 systemd, D-Bus, Openbox, a compositor, or a target package manager.
 
-Current source version: `0.1.11`.
+Current source version: `0.1.12`.
 
 ## Lean resident profile
 
@@ -323,6 +323,17 @@ responsive wrap policy on narrow screens. History defaults to 100 entries at
 `${MSYS_STATE_DIR:-/opt/msys-state}/notifications/history.json`; override it
 with `MSYS_NOTIFICATION_HISTORY` and set the bound with
 `MSYS_NOTIFICATION_HISTORY_LIMIT` (maximum 1000).
+
+The provider advertises component readiness before importing or initializing
+Tk, so a slow first X11/font initialization cannot cross the supervisor's
+five-second readiness deadline and cause a wasteful warm-process restart. An
+early `show` request is accepted by the IPC worker and retained in the UI
+queue. The panel itself remains lazy, maps as a light touch-sized surface, and
+renders a bounded newest-first prefix before completing a large history at Tk
+idle priority. If a product profile supplies the already-validated
+`MSYS_UI_FONT_FAMILY`, the notification provider configures that exact family
+without enumerating every Xft family; profiles without an explicit family keep
+the SDK's CJK-capable discovery policy.
 
 The canonical manifest keeps every visual role on `windowing.display=inherit`
 and declares its X11, mIPC subscription/call/publication, and private state

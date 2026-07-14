@@ -3,7 +3,7 @@
   "package": {
     "id": "org.msys.shell.pyside",
     "name": "MSYS Reference Shell",
-    "version": "0.1.11",
+    "version": "0.1.12",
     "kind": "system",
     "vendor": "MSYS",
     "summary": "Replaceable responsive shell, navigation, notification, chooser, and transition roles",

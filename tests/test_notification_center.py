@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import queue
 import tempfile
 import unittest
@@ -10,14 +11,17 @@ from unittest import mock
 
 from msys_shell_pyside.notification_center import (
     HISTORY_SCHEMA,
+    INITIAL_RENDER_NOTIFICATIONS,
     MAX_MESSAGE_CHARS,
     NOTIFICATION_TOPICS,
     NotificationCenterService,
     NotificationCenterUi,
     NotificationHistoryStore,
+    configure_notification_fonts,
     notification_lines,
     notification_wrap_limit,
     normalize_notification,
+    run_tk,
 )
 from msys_shell_pyside.localization import SHELL_I18N
 from msys_shell_pyside.tk_roles import (
@@ -264,6 +268,126 @@ class NotificationCenterServiceTests(unittest.TestCase):
         ui = NotificationCenterUi(object(), self.service, lambda: None)
         self.assertFalse(self.service.visible)
         self.assertIsNone(ui.panel)
+
+    def test_320x480_panel_is_light_full_width_material_surface(self) -> None:
+        root = SimpleNamespace(
+            winfo_screenwidth=lambda: 320,
+            winfo_screenheight=lambda: 480,
+        )
+        ui = NotificationCenterUi(root, self.service, lambda: None)
+        rect = ui._panel_rect()
+        self.assertEqual((rect.width, rect.height, rect.x, rect.y), (304, 422, 8, 8))
+
+    def test_first_map_renders_a_bounded_prefix_then_finishes_idle(self) -> None:
+        class Listbox:
+            def __init__(self) -> None:
+                self.lines: list[str] = []
+
+            def delete(self, *_args) -> None:
+                self.lines.clear()
+
+            def insert(self, _where, line: str) -> None:
+                self.lines.append(line)
+
+            def winfo_width(self) -> int:
+                return 272
+
+        callbacks: list[object] = []
+        root = SimpleNamespace(after_idle=callbacks.append)
+        ui = NotificationCenterUi(root, self.service, lambda: None)
+        ui.panel = object()
+        ui.listbox = Listbox()
+        ui.count_label = mock.Mock()
+        notifications = [
+            normalize_notification(
+                "msys.notification.post",
+                {"message": f"notice-{index}"},
+                timestamp_ms=index,
+                notification_id=f"id-{index}",
+            )
+            for index in range(INITIAL_RENDER_NOTIFICATIONS + 4)
+        ]
+
+        ui.refresh(
+            notifications,
+            maximum=INITIAL_RENDER_NOTIFICATIONS,
+            defer_remaining=True,
+        )
+
+        self.assertEqual(len(callbacks), 1)
+        self.assertEqual(len(ui.listbox.lines), INITIAL_RENDER_NOTIFICATIONS)
+        callbacks[0]()
+        self.assertEqual(len(ui.listbox.lines), len(notifications))
+        ui.count_label.configure.assert_called_with(text=str(len(notifications)))
+
+    def test_mipc_is_ready_before_tk_cold_path(self) -> None:
+        source = inspect.getsource(run_tk)
+        self.assertLess(source.index("client.ready()"), source.index("NotificationHistoryStore("))
+        self.assertLess(source.index("client.ready()"), source.index("tk.Tk("))
+        self.assertGreater(source.index('"msys.role.ready"'), source.index("tk.Tk("))
+        self.assertIn("root.after(0, pump)", source)
+
+
+class NotificationFontFastPathTests(unittest.TestCase):
+    def test_explicit_family_skips_font_enumeration_policy(self) -> None:
+        configured: list[dict[str, object]] = []
+
+        class NamedFont:
+            def configure(self, **options) -> None:
+                configured.append(options)
+
+        font_module = SimpleNamespace(
+            nametofont=lambda _name, **_options: NamedFont(),
+        )
+        root = SimpleNamespace()
+        with (
+            mock.patch.dict(
+                "os.environ",
+                {"MSYS_COMPONENT_ID": "org.msys.shell.pyside:notification-center"},
+                clear=True,
+            ),
+            mock.patch(
+                "msys_shell_pyside.notification_center.requested_font_family",
+                return_value="Noto Sans CJK SC",
+            ),
+            mock.patch(
+                "msys_shell_pyside.notification_center.configure_tk_fonts"
+            ) as full_policy,
+            mock.patch(
+                "msys_sdk.ui_identity.configure_tk_window_identity"
+            ) as identity_policy,
+        ):
+            selected = configure_notification_fonts(
+                root,
+                default_size=10,
+                font_module=font_module,
+            )
+
+        self.assertEqual(selected, "Noto Sans CJK SC")
+        self.assertTrue(configured)
+        self.assertTrue(all(item["family"] == selected for item in configured))
+        self.assertEqual(root._msys_tk_font_family, selected)
+        full_policy.assert_not_called()
+        identity_policy.assert_called_once_with(
+            root,
+            "org.msys.shell.notification-center",
+        )
+
+    def test_automatic_family_keeps_sdk_cjk_policy(self) -> None:
+        root = object()
+        with (
+            mock.patch(
+                "msys_shell_pyside.notification_center.requested_font_family",
+                return_value="",
+            ),
+            mock.patch(
+                "msys_shell_pyside.notification_center.configure_tk_fonts",
+                return_value="Auto CJK",
+            ) as full_policy,
+        ):
+            selected = configure_notification_fonts(root, default_size=10)
+        self.assertEqual(selected, "Auto CJK")
+        full_policy.assert_called_once_with(root, default_size=10)
 
 
 class _ImmediateThread:

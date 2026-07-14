@@ -1,6 +1,6 @@
 [project]
 name = "msys-shell-pyside"
-version = "0.1.11"
+version = "0.1.12"
 description = "Reference PySide shell providers for MSYS"
 requires-python = ">=3.10"
 dependencies = ["msys-sdk>=0.1.4"]
