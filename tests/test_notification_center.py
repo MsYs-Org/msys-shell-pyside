@@ -18,10 +18,12 @@ from msys_shell_pyside.notification_center import (
     NotificationCenterUi,
     NotificationHistoryStore,
     configure_notification_fonts,
+    configure_notification_window_identity,
     notification_lines,
     notification_wrap_limit,
     normalize_notification,
     run_tk,
+    startup_timing_enabled,
 )
 from msys_shell_pyside.localization import SHELL_I18N
 from msys_shell_pyside.tk_roles import (
@@ -326,6 +328,17 @@ class NotificationCenterServiceTests(unittest.TestCase):
         self.assertLess(source.index("client.ready()"), source.index("tk.Tk("))
         self.assertGreater(source.index('"msys.role.ready"'), source.index("tk.Tk("))
         self.assertIn("root.after(0, pump)", source)
+        for phase in (
+            "module-entry",
+            "mipc-ready",
+            "history-loaded",
+            "tk-imported",
+            "root-created",
+            "fonts-configured",
+            "first-panel-built",
+            "first-show-dispatched",
+        ):
+            self.assertIn(f'mark_startup("{phase}")', source)
 
 
 class NotificationFontFastPathTests(unittest.TestCase):
@@ -353,9 +366,6 @@ class NotificationFontFastPathTests(unittest.TestCase):
             mock.patch(
                 "msys_shell_pyside.notification_center.configure_tk_fonts"
             ) as full_policy,
-            mock.patch(
-                "msys_sdk.ui_identity.configure_tk_window_identity"
-            ) as identity_policy,
         ):
             selected = configure_notification_fonts(
                 root,
@@ -368,10 +378,6 @@ class NotificationFontFastPathTests(unittest.TestCase):
         self.assertTrue(all(item["family"] == selected for item in configured))
         self.assertEqual(root._msys_tk_font_family, selected)
         full_policy.assert_not_called()
-        identity_policy.assert_called_once_with(
-            root,
-            "org.msys.shell.notification-center",
-        )
 
     def test_automatic_family_keeps_sdk_cjk_policy(self) -> None:
         root = object()
@@ -388,6 +394,60 @@ class NotificationFontFastPathTests(unittest.TestCase):
             selected = configure_notification_fonts(root, default_size=10)
         self.assertEqual(selected, "Auto CJK")
         full_policy.assert_called_once_with(root, default_size=10)
+
+
+class NotificationWindowIdentityTests(unittest.TestCase):
+    def test_visible_toplevel_uses_canonical_package_component_and_role(self) -> None:
+        window = object()
+        legacy_environment = {
+            "MSYS_APP_ID": "org.msys.shell.notification-center",
+            "MSYS_COMPONENT_ID": "wrong:component",
+            "MSYS_WINDOW_ROLE": "application",
+            "MSYS_WINDOW_IDENTITY": "WrongClass",
+            "DISPLAY": ":24",
+        }
+        with mock.patch(
+            "msys_sdk.ui_identity.configure_tk_window_identity",
+            return_value="identity",
+        ) as configure:
+            result = configure_notification_window_identity(
+                window,
+                environ=legacy_environment,
+            )
+
+        self.assertEqual(result, "identity")
+        configure.assert_called_once()
+        args, kwargs = configure.call_args
+        self.assertEqual(args, (window, "org.msys.shell.pyside"))
+        self.assertEqual(kwargs["default_role"], "notification-center")
+        self.assertEqual(kwargs["default_instance"], "notification-center")
+        self.assertEqual(kwargs["environ"]["MSYS_APP_ID"], "org.msys.shell.pyside")
+        self.assertEqual(
+            kwargs["environ"]["MSYS_COMPONENT_ID"],
+            "org.msys.shell.pyside:notification-center",
+        )
+        self.assertEqual(kwargs["environ"]["MSYS_WINDOW_ROLE"], "notification-center")
+        self.assertEqual(
+            kwargs["environ"]["MSYS_WINDOW_IDENTITY"],
+            "org.msys.shell.notification-center",
+        )
+        self.assertEqual(kwargs["environ"]["DISPLAY"], ":24")
+
+    def test_panel_identity_is_applied_before_first_map(self) -> None:
+        source = inspect.getsource(NotificationCenterUi._create_panel)
+        self.assertLess(
+            source.index("panel.withdraw()"),
+            source.index("configure_notification_window_identity(panel)"),
+        )
+        self.assertNotIn("deiconify", source)
+
+    def test_startup_timing_is_explicit_or_inherited_from_debug(self) -> None:
+        self.assertFalse(startup_timing_enabled({}))
+        self.assertTrue(startup_timing_enabled({"MSYS_STARTUP_TIMING": "1"}))
+        self.assertTrue(startup_timing_enabled({"DEBUG": "true"}))
+        self.assertFalse(
+            startup_timing_enabled({"MSYS_STARTUP_TIMING": "0", "DEBUG": "1"})
+        )
 
 
 class _ImmediateThread:

@@ -3,7 +3,7 @@
 Reference MSYS shell providers implemented in Python. They do not require
 systemd, D-Bus, Openbox, a compositor, or a target package manager.
 
-Current source version: `0.1.12`.
+Current source version: `0.1.13`.
 
 ## Lean resident profile
 
@@ -333,7 +333,12 @@ renders a bounded newest-first prefix before completing a large history at Tk
 idle priority. If a product profile supplies the already-validated
 `MSYS_UI_FONT_FAMILY`, the notification provider configures that exact family
 without enumerating every Xft family; profiles without an explicit family keep
-the SDK's CJK-capable discovery policy.
+the SDK's CJK-capable discovery policy. The real managed notification
+`Toplevel` receives the canonical package, component, role, and WM class
+properties before its first map; those properties are not assumed to inherit
+from the hidden Tk host. Set `MSYS_STARTUP_TIMING=1` (or `DEBUG=1`) to emit
+one-shot module/mIPC/history/Tk/font/panel/first-show phase timings for cold
+start diagnosis without keeping the provider resident.
 
 The canonical manifest keeps every visual role on `windowing.display=inherit`
 and declares its X11, mIPC subscription/call/publication, and private state

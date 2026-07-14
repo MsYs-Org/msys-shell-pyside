@@ -198,6 +198,14 @@ class ShellManifestTests(unittest.TestCase):
         self.assertEqual(status["provides"][0]["capability"], "status.system")
         self.assertEqual(self.components["navigation"]["lifecycle"], "background")
 
+    def test_notification_center_separates_package_id_from_wm_class(self) -> None:
+        identity = self.components["notification-center"]["windowing"]["identity"]
+        self.assertEqual(identity["app_id"], "org.msys.shell.pyside")
+        self.assertEqual(
+            identity["x11_wm_class"],
+            "org.msys.shell.notification-center",
+        )
+
     def test_versioned_role_contract_claims_cover_launcher_and_navigation(self) -> None:
         expected = {
             "launcher": (

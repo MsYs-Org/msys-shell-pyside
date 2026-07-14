@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import time
+
+# Capture this before importing the SDK and the rest of the provider so the
+# opt-in startup trace includes Python/module loading, not just Tk work.
+_MODULE_ENTRY_STARTED = time.perf_counter()
+
 import json
 import os
 import queue
@@ -7,9 +13,8 @@ import secrets
 import tempfile
 import textwrap
 import threading
-import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from msys_sdk import MsysClient
 
@@ -41,6 +46,9 @@ MAX_NOTIFICATION_WRAP_CHARS = 80
 ESTIMATED_GLYPH_PIXELS = 13
 INITIAL_RENDER_NOTIFICATIONS = 16
 HOST_PUMP_INTERVAL_MS = 40
+NOTIFICATION_APP_ID = "org.msys.shell.pyside"
+NOTIFICATION_COMPONENT_ID = "org.msys.shell.pyside:notification-center"
+NOTIFICATION_WINDOW_IDENTITY = "org.msys.shell.notification-center"
 
 # Shared light Material-ish palette. The panel deliberately uses flat Tk
 # primitives so it remains available on the 11 MiB target without ttk themes
@@ -85,22 +93,42 @@ def configure_notification_fonts(
         except (TclError, RuntimeError, TypeError):
             continue
     setattr(root, "_msys_tk_font_family", family)
-    if any(
-        os.environ.get(name)
-        for name in (
-            "MSYS_APP_ID",
-            "MSYS_COMPONENT_ID",
-            "MSYS_WINDOW_IDENTITY",
-            "MSYS_WINDOW_ROLE",
-        )
-    ):
-        from msys_sdk.ui_identity import configure_tk_window_identity
-
-        configure_tk_window_identity(
-            root,
-            os.environ.get("MSYS_APP_ID", "org.msys.shell.notification-center"),
-        )
     return family
+
+
+def configure_notification_window_identity(
+    window: Any,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> Any:
+    """Apply the notification role identity to each managed Tk surface.
+
+    The package manifest historically used the window class as ``MSYS_APP_ID``.
+    Do not let that legacy value leak into the canonical package/component
+    properties on the independently managed notification ``Toplevel``.
+    """
+
+    from msys_sdk.ui_identity import configure_tk_window_identity
+
+    values = dict(os.environ if environ is None else environ)
+    values["MSYS_APP_ID"] = NOTIFICATION_APP_ID
+    values["MSYS_COMPONENT_ID"] = NOTIFICATION_COMPONENT_ID
+    values["MSYS_WINDOW_ROLE"] = "notification-center"
+    values["MSYS_WINDOW_IDENTITY"] = NOTIFICATION_WINDOW_IDENTITY
+    return configure_tk_window_identity(
+        window,
+        NOTIFICATION_APP_ID,
+        default_role="notification-center",
+        default_instance="notification-center",
+        environ=values,
+    )
+
+
+def startup_timing_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    values = os.environ if environ is None else environ
+    return str(
+        values.get("MSYS_STARTUP_TIMING", values.get("DEBUG", ""))
+    ).strip().casefold() in {"1", "true", "yes", "on"}
 
 
 def _bounded_text(value: Any, limit: int) -> str:
@@ -479,6 +507,10 @@ class NotificationCenterUi:
         )
         self.panel = panel
         panel.withdraw()
+        # A Toplevel has its own X11 wrapper and does not inherit the hidden
+        # host's properties.  Apply identity after native creation/withdrawal
+        # and before its first MapRequest.
+        configure_notification_window_identity(panel)
         panel.title(shell_text("notification.window_title"))
         panel.geometry(self._geometry())
         panel.configure(bg=WINDOW_BG)
@@ -669,15 +701,36 @@ class NotificationCenterUi:
 
 
 def run_tk() -> int:
+    timing = startup_timing_enabled()
+    startup_previous = _MODULE_ENTRY_STARTED
+    startup_seen: set[str] = set()
+
+    def mark_startup(phase: str) -> None:
+        nonlocal startup_previous
+        if not timing or phase in startup_seen:
+            return
+        now = time.perf_counter()
+        print(
+            "notification-center: startup "
+            f"phase={phase} elapsed_ms={(now - _MODULE_ENTRY_STARTED) * 1000:.1f} "
+            f"delta_ms={(now - startup_previous) * 1000:.1f}",
+            flush=True,
+        )
+        startup_previous = now
+        startup_seen.add(phase)
+
+    mark_startup("module-entry")
     client = MsysClient.from_env()
     client.hello()
     for topic in sorted(NOTIFICATION_TOPICS):
         client.subscribe(topic)
     client.ready()
+    mark_startup("mipc-ready")
 
     store = NotificationHistoryStore(history_path_from_env(), history_limit_from_env())
     actions: queue.Queue[tuple[str, Any]] = queue.Queue()
     service = NotificationCenterService(store, actions)
+    mark_startup("history-loaded")
 
     def ipc_loop() -> None:
         try:
@@ -702,10 +755,14 @@ def run_tk() -> int:
     threading.Thread(target=ipc_loop, name="msys-notification-center-ipc", daemon=True).start()
 
     import tkinter as tk
+    mark_startup("tk-imported")
 
     root = tk.Tk(className=os.environ.get("MSYS_WINDOW_IDENTITY", "MsysNotificationCenter"))
     root.withdraw()
+    mark_startup("root-created")
     configure_notification_fonts(root, default_size=10)
+    configure_notification_window_identity(root)
+    mark_startup("fonts-configured")
     root.title("msys-notification-center-host")
     client.event(
         "msys.role.ready",
@@ -725,7 +782,11 @@ def run_tk() -> int:
                 break
             if action == "visibility":
                 if value:
+                    if ui.panel is None:
+                        ui._create_panel()
+                        mark_startup("first-panel-built")
                     ui.show()
+                    mark_startup("first-show-dispatched")
                 else:
                     ui.hide()
             elif action == "history":

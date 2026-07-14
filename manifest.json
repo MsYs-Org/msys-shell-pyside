@@ -3,7 +3,7 @@
   "package": {
     "id": "org.msys.shell.pyside",
     "name": "MSYS Reference Shell",
-    "version": "0.1.12",
+    "version": "0.1.13",
     "kind": "system",
     "vendor": "MSYS",
     "summary": "Replaceable responsive shell, navigation, notification, chooser, and transition roles",
@@ -180,7 +180,7 @@
         "mode": "overlay",
         "title": "MSYS Notification Center",
         "identity": {
-          "app_id": "org.msys.shell.notification-center",
+          "app_id": "org.msys.shell.pyside",
           "x11_wm_class": "org.msys.shell.notification-center"
         }
       },
