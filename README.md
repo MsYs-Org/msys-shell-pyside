@@ -3,7 +3,7 @@
 Reference MSYS shell providers implemented in Python. They do not require
 systemd, D-Bus, Openbox, a compositor, or a target package manager.
 
-Current source version: `0.1.13`.
+Current source version: `0.1.14`.
 
 ## Lean resident profile
 

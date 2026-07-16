@@ -3,8 +3,6 @@ from __future__ import annotations
 import argparse
 import os
 import queue
-import subprocess
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -1279,25 +1277,6 @@ def bind_system_chrome_notification_toggle(root, role_call=None) -> None:
     root.bind("<ButtonRelease-1>", on_release, add="+")
 
 
-def run_xmessage_fallback(role: str) -> int:
-    spec = ROLES[role]
-    proc = subprocess.Popen([
-        "xmessage",
-        "-geometry",
-        spec.geometry,
-        "-buttons",
-        "",
-        spec.text,
-    ])
-    client = ipc_connect(role)
-    mark_ipc_ready(client, role)
-    try:
-        client.run()
-    finally:
-        proc.terminate()
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("role", choices=sorted(ROLES))
@@ -1316,18 +1295,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_tk(args.role, visible=os.environ.get("MSYS_ROLE_VISIBLE", "1") != "0")
     except Exception as exc:
         print(f"{args.role} tk failed: {exc}", flush=True)
-        if os.environ.get("MSYS_ROLE_FALLBACK") == "xmessage" and os.environ.get("DISPLAY") and shutil_which("xmessage"):
-            return run_xmessage_fallback(args.role)
         # A visual role that cannot reach X must fail so msysd can restart or
         # quarantine it.  Silent headless success leaves the screen without
         # navigation while reporting a misleading ready state.
         return 1
-
-
-def shutil_which(name: str) -> str | None:
-    from shutil import which
-
-    return which(name)
 
 
 if __name__ == "__main__":
